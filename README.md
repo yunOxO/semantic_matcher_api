@@ -105,7 +105,7 @@ curl -X POST "http://localhost:8000/api/v1/similarity/match" \
       "深度学习在图像识别中应用广泛",
       "这是一篇关于人工智能的文章，讨论了AI的发展"
     ],
-    "model_name": "bge-large-zh",
+    "model_name": "qwen3-embedding-0.6b",
     "threshold": 0.85
   }'
 ```
@@ -116,7 +116,7 @@ curl -X POST "http://localhost:8000/api/v1/similarity/match" \
 {
   "matched_index": 2,
   "max_score": 0.9234,
-  "model_used": "bge-large-zh"
+  "model_used": "qwen3-embedding-0.6b"
 }
 ```
 
