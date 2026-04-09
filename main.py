@@ -29,13 +29,20 @@ logger = logging.getLogger(__name__)
 MODEL_SERVICE_URLS: Dict[str, str] = {
     "bge-large-zh": os.getenv("BGE_SERVICE_URL", "http://localhost:8801/embeddings"),
     "qwen3-embedding-0.6b": os.getenv("QWEN_SERVICE_URL", "http://localhost:8800/embeddings"),
+    "text-embedding-v4": os.getenv("ALIYUN_EMB_SERVICE_URL", "https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding"),
 }
+
+# 模型类型标识
+ALIYUN_MODELS = {"text-embedding-v4"}
 
 # 默认模型名称
 DEFAULT_MODEL_NAME = "qwen3-embedding-0.6b"
 
 # HTTP客户端超时设置
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "60.0"))
+
+# 阿里云 API 配置
+ALIYUN_API_KEY = os.getenv("ALIYUN_API_KEY", "DEFAULT")
 
 
 # ============== Pydantic 数据模型 ==============
@@ -54,7 +61,7 @@ class MatchRequest(BaseModel):
     )
     model_name: str = Field(
         DEFAULT_MODEL_NAME,
-        description="使用的Embedding模型名，支持: 'bge-large-zh', 'qwen3-embedding-0.6B'",
+        description="使用的Embedding模型名，支持: 'bge-large-zh', 'qwen3-embedding-0.6b', 'text-embedding-v4'",
     )
     threshold: float = Field(
         0.85,
@@ -138,21 +145,44 @@ class EmbeddingServiceClient:
             raise RuntimeError("Client not initialized. Use async context manager.")
         
         try:
-            response = await self._client.post(
-                service_url,
-                json={
-                    "input": texts,
-                    "model": model_name
-                }
-            )
-            response.raise_for_status()
-            result = response.json()
-            
-            embeddings = []
-            for data in result.get("data", []):
-                embeddings.append(data.get("embedding", []))
-            
-            return np.array(embeddings)
+            if model_name in ALIYUN_MODELS:
+                response = await self._client.post(
+                    service_url,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {ALIYUN_API_KEY}"
+                    },
+                    json={
+                        "model": model_name,
+                        "input": {
+                            "texts": texts
+                        }
+                    }
+                )
+                response.raise_for_status()
+                result = response.json()
+                
+                embeddings = []
+                for item in result.get("output", {}).get("embeddings", []):
+                    embeddings.append(item.get("embedding", []))
+                
+                return np.array(embeddings)
+            else:
+                response = await self._client.post(
+                    service_url,
+                    json={
+                        "input": texts,
+                        "model": model_name
+                    }
+                )
+                response.raise_for_status()
+                result = response.json()
+                
+                embeddings = []
+                for data in result.get("data", []):
+                    embeddings.append(data.get("embedding", []))
+                
+                return np.array(embeddings)
             
         except httpx.HTTPStatusError as e:
             logger.error(f"Embedding 服务返回错误: {e.response.status_code} - {e.response.text}")

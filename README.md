@@ -22,11 +22,11 @@
 
 ## 支持的模型
 
-| 模型简称 | HuggingFace 模型名 | ModelScope 模型名 |
-|---------|-------------------|-------------------|
-| bge-large-zh | BAAI/bge-large-zh-v1.5 | BAAI/bge-large-zh-v1.5 |
-| bge-m3 | BAAI/bge-m3 | BAAI/bge-m3 |
-| qwen3-embedding-0.6B | Qwen/Qwen3-Embedding-0.6B | Qwen/Qwen3-Embedding-0.6B |  
+| 模型简称 | 说明 |
+|---------|------|
+| bge-large-zh | 本地 BGE 模型 (端口 8801) |
+| qwen3-embedding-0.6b | 本地 Qwen3 模型 (端口 8800) |
+| text-embedding-v4 | 阿里云官方 Embedding API |  
 
 ## 快速开始
 
@@ -105,7 +105,7 @@ curl -X POST "http://localhost:8000/api/v1/similarity/match" \
       "深度学习在图像识别中应用广泛",
       "这是一篇关于人工智能的文章，讨论了AI的发展"
     ],
-    "model_name": "qwen3-embedding-0.6b",
+    "model_name": "text-embedding-v4",
     "threshold": 0.85
   }'
 ```
@@ -116,7 +116,7 @@ curl -X POST "http://localhost:8000/api/v1/similarity/match" \
 {
   "matched_index": 2,
   "max_score": 0.9234,
-  "model_used": "qwen3-embedding-0.6b"
+  "model_used": "text-embedding-v4"
 }
 ```
 
@@ -133,6 +133,11 @@ curl -X POST "http://localhost:8000/api/v1/similarity/match" \
 | HOST | 0.0.0.0 | 服务监听地址 |
 | PORT | 8000 | 服务端口 |
 | RELOAD | false | 是否开启热重载（开发环境） |
+| BGE_SERVICE_URL | http://localhost:8801/embeddings | BGE 模型服务地址 |
+| QWEN_SERVICE_URL | http://localhost:8800/embeddings | Qwen 模型服务地址 |
+| ALIYUN_EMB_SERVICE_URL | https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding | 阿里云 Embedding API 地址 |
+| ALIYUN_API_KEY | sk-bc98c76b621047d2a73a56609c460ac7 | 阿里云 API Key |
+| HTTP_TIMEOUT | 60.0 | HTTP 请求超时时间（秒） |
 
 ## 项目结构
 
@@ -155,6 +160,49 @@ similarity-match/
 2. **批量推理**: 将多个文本一次性送入模型，比单条处理效率更高
 3. **GPU 加速**: 如果有 GPU，sentence-transformers 会自动使用
 4. **模型选择**: 根据场景选择合适的模型，轻量级模型推理更快
+
+## 阿里云 Embedding API 使用说明
+
+本项目支持使用阿里云官方的 text-embedding-v4 模型。
+
+### 配置 API Key
+
+使用环境变量设置阿里云 API Key：
+
+```bash
+# Linux/macOS
+export ALIYUN_API_KEY="your-api-key-here"
+
+# Windows PowerShell
+$env:ALIYUN_API_KEY="your-api-key-here"
+```
+
+默认 API Key 已内置，建议使用您自己的 Key。
+
+### 调用示例
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/similarity/match" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source_text": "这是一篇关于人工智能的文章",
+    "compare_list": [
+      "机器学习是人工智能的一个分支",
+      "深度学习在图像识别中应用广泛",
+      "这是一篇关于人工智能的文章，讨论了AI的发展"
+    ],
+    "model_name": "text-embedding-v4",
+    "threshold": 0.85
+  }'
+```
+
+### 自定义 API 地址
+
+如果需要使用其他阿里云 API 网关地址，可以通过环境变量配置：
+
+```bash
+export ALIYUN_EMB_SERVICE_URL="https://your-custom-gateway.com/api/v1/services/embeddings/text-embedding/text-embedding"
+```
 
 ## Flash Attention 2 配置（Qwen3-06B 模型专用）
 
