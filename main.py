@@ -1,7 +1,7 @@
 """
 文本相似度匹配 API 服务
 
-基于 FastAPI + sentence-transformers 实现，支持多模型切换和批量推理。
+基于 FastAPI + 外部 Embedding 服务实现，支持多模型切换和批量推理。
 """
 
 import logging
@@ -11,9 +11,9 @@ from contextlib import asynccontextmanager
 
 import numpy as np
 import uvicorn
+import httpx
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
-from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
 # 配置日志
@@ -23,16 +23,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ============== 模型配置 ==============
+# ============== 配置 ==============
 
-# 支持的模型映射表
-SUPPORTED_MODELS: Dict[str, str] = {
-    "bge-large-zh": "BAAI/bge-large-zh-v1.5",
-    "qwen3-embedding-0.6B": "Alibaba-NLP/gte-Qwen2-1.5B-instruct",  # 备选方案
+# 模型到服务地址的映射
+MODEL_SERVICE_URLS: Dict[str, str] = {
+    "bge-large-zh": os.getenv("BGE_SERVICE_URL", "http://localhost:8801/embeddings"),
+    "qwen3-embedding-0.6b": os.getenv("QWEN_SERVICE_URL", "http://localhost:8800/embeddings"),
 }
 
 # 默认模型名称
-DEFAULT_MODEL_NAME = "bge-large-zh"
+DEFAULT_MODEL_NAME = "qwen3-embedding-0.6b"
+
+# HTTP客户端超时设置
+HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "60.0"))
 
 
 # ============== Pydantic 数据模型 ==============
@@ -51,7 +54,7 @@ class MatchRequest(BaseModel):
     )
     model_name: str = Field(
         DEFAULT_MODEL_NAME,
-        description="使用的Embedding模型名，支持: 'bge-large-zh', 'qwen3-embedding-0.6B'"
+        description="使用的Embedding模型名，支持: 'bge-large-zh', 'qwen3-embedding-0.6B'",
     )
     threshold: float = Field(
         0.85,
@@ -80,160 +83,95 @@ class MatchResponse(BaseModel):
 class HealthResponse(BaseModel):
     """健康检查响应模型"""
     status: str
-    loaded_models: List[str]
+    available_models: List[str]
 
 
-# ============== 模型管理器（单例模式） ==============
+# ============== Embedding 服务客户端 ==============
 
-class ModelManager:
+class EmbeddingServiceClient:
     """
-    Embedding 模型管理器（单例模式）
+    Embedding 服务客户端
     
-    负责模型的懒加载和缓存，确保每个模型只加载一次，避免重复加载造成的性能损耗。
+    负责通过 HTTP 接口调用外部 Embedding 服务获取文本向量。
     """
-    _instance: Optional["ModelManager"] = None
-    _models: Dict[str, SentenceTransformer] = {}
-    _lock: bool = False
     
-    def __new__(cls) -> "ModelManager":
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
+    def __init__(self, timeout: float = 60.0):
+        self.timeout = timeout
+        self._client: Optional[httpx.AsyncClient] = None
     
-    def _get_model_key(self, model_name: str) -> str:
-        """获取模型缓存键"""
-        return model_name.lower().strip()
+    async def __aenter__(self):
+        self._client = httpx.AsyncClient(timeout=self.timeout)
+        return self
     
-    def _get_model_path(self, model_name: str) -> str:
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self._client:
+            await self._client.aclose()
+    
+    def get_service_url(self, model_name: str) -> str:
+        """获取模型对应的服务地址"""
+        model_key = model_name.lower().strip()
+        if model_key not in MODEL_SERVICE_URLS:
+            raise ValueError(f"不支持的模型: {model_name}，支持的模型: {list(MODEL_SERVICE_URLS.keys())}")
+        return MODEL_SERVICE_URLS[model_key]
+    
+    async def get_embeddings(
+        self,
+        texts: List[str],
+        model_name: str
+    ) -> np.ndarray:
         """
-        获取模型路径
-        
-        支持传入简称或完整路径，自动映射到 HuggingFace 模型名
-        """
-        model_key = self._get_model_key(model_name)
-        
-        # 如果是支持的简称，映射到完整路径
-        if model_key in SUPPORTED_MODELS:
-            return SUPPORTED_MODELS[model_key]
-        
-        # 否则直接返回传入的路径（支持自定义模型）
-        return model_name
-    
-    def load_model(self, model_name: str) -> SentenceTransformer:
-        """
-        加载指定模型（懒加载）
+        批量获取文本的 Embedding 向量
         
         Args:
-            model_name: 模型名称（支持简称或完整路径）
+            texts: 文本列表
+            model_name: 模型名称
             
         Returns:
-            SentenceTransformer: 加载好的模型实例
-            
-        Raises:
-            ValueError: 模型名称不支持时
-            RuntimeError: 模型加载失败时
+            np.ndarray: 文本向量矩阵 (N x D)
         """
-        model_key = self._get_model_key(model_name)
+        if not texts:
+            return np.array([])
         
-        # 检查缓存
-        if model_key in self._models:
-            logger.info(f"使用缓存的模型: {model_name}")
-            return self._models[model_key]
+        service_url = self.get_service_url(model_name)
         
-        # 防止并发加载
-        if self._lock:
-            raise RuntimeError("模型正在加载中，请稍后重试")
+        if self._client is None:
+            raise RuntimeError("Client not initialized. Use async context manager.")
         
         try:
-            self._lock = True
-            model_path = self._get_model_path(model_name)
+            response = await self._client.post(
+                service_url,
+                json={
+                    "input": texts,
+                    "model": model_name
+                }
+            )
+            response.raise_for_status()
+            result = response.json()
             
-            logger.info(f"正在加载模型: {model_name} (路径: {model_path})")
+            embeddings = []
+            for data in result.get("data", []):
+                embeddings.append(data.get("embedding", []))
             
-            # 加载模型
-            model = SentenceTransformer(model_path)
+            return np.array(embeddings)
             
-            # 缓存模型
-            self._models[model_key] = model
-            
-            logger.info(f"模型加载成功: {model_name}")
-            return model
-            
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Embedding 服务返回错误: {e.response.status_code} - {e.response.text}")
+            raise RuntimeError(f"Embedding 服务错误: {e.response.status_code}")
         except Exception as e:
-            logger.error(f"模型加载失败: {model_name}, 错误: {str(e)}")
-            raise RuntimeError(f"无法加载模型 '{model_name}': {str(e)}")
-        finally:
-            self._lock = False
-    
-    def get_model(self, model_name: str) -> SentenceTransformer:
-        """
-        获取已加载的模型，如未加载则自动加载
-        
-        Args:
-            model_name: 模型名称
-            
-        Returns:
-            SentenceTransformer: 模型实例
-        """
-        model_key = self._get_model_key(model_name)
-        
-        if model_key not in self._models:
-            return self.load_model(model_name)
-        
-        return self._models[model_key]
-    
-    def get_loaded_models(self) -> List[str]:
-        """获取已加载的模型列表"""
-        return list(self._models.keys())
-    
-    def preload_models(self, model_names: List[str]) -> None:
-        """
-        预加载多个模型
-        
-        Args:
-            model_names: 需要预加载的模型名称列表
-        """
-        for name in model_names:
-            try:
-                self.load_model(name)
-            except Exception as e:
-                logger.warning(f"预加载模型失败: {name}, 错误: {str(e)}")
-    
-    def match(
-        self,
-        source_text: str,
-        compare_list: List[str],
-        model_name: str = DEFAULT_MODEL_NAME,
-        threshold: float = 0.85
-    ) -> Dict[str, Any]:
-        """
-        执行相似度匹配
-        
-        Args:
-            source_text: 源文本
-            compare_list: 对比文本列表
-            model_name: 模型名称
-            threshold: 相似度阈值
-            
-        Returns:
-            Dict: 匹配结果
-        """
-        model = self.get_model(model_name)
-        result = SimilarityMatcher.match(
-            source_text=source_text,
-            compare_list=compare_list,
-            model=model,
-            threshold=threshold
-        )
-        return {
-            "matched_index": result.matched_index,
-            "max_score": result.max_score,
-            "model_used": model_name
-        }
+            logger.error(f"调用 Embedding 服务失败: {str(e)}")
+            raise RuntimeError(f"调用 Embedding 服务失败: {str(e)}")
 
 
-# 全局模型管理器实例
-model_manager = ModelManager()
+# 全局 Embedding 客户端
+_embedding_client: Optional[EmbeddingServiceClient] = None
+
+
+async def get_embedding_client() -> EmbeddingServiceClient:
+    """获取 Embedding 客户端实例"""
+    global _embedding_client
+    if _embedding_client is None:
+        _embedding_client = EmbeddingServiceClient(timeout=HTTP_TIMEOUT)
+    return _embedding_client
 
 
 # ============== 核心业务逻辑 ==============
@@ -246,24 +184,26 @@ class SimilarityMatcher:
     """
     
     @staticmethod
-    def compute_embeddings(texts: List[str], model: SentenceTransformer) -> np.ndarray:
+    async def compute_embeddings(
+        texts: List[str],
+        model_name: str,
+        client: EmbeddingServiceClient
+    ) -> np.ndarray:
         """
         批量计算文本的 Embedding 向量
         
         Args:
             texts: 文本列表
-            model: SentenceTransformer 模型
+            model_name: 模型名称
+            client: Embedding 服务客户端
             
         Returns:
             np.ndarray: 文本向量矩阵 (N x D)
         """
-        # 使用模型批量编码，提高效率
-        embeddings = model.encode(
-            texts,
-            convert_to_numpy=True,
-            show_progress_bar=False,
-            batch_size=32
-        )
+        if not texts:
+            return np.array([])
+        
+        embeddings = await client.get_embeddings(texts, model_name)
         return embeddings
     
     @staticmethod
@@ -281,27 +221,24 @@ class SimilarityMatcher:
         Returns:
             tuple: (最相似文本的索引, 相似度得分)
         """
-        # 确保维度正确
         if source_embedding.ndim == 1:
             source_embedding = source_embedding.reshape(1, -1)
         
-        # 计算余弦相似度
-        # source: (1 x D), compare: (N x D) -> similarities: (1 x N)
         similarities = cosine_similarity(source_embedding, compare_embeddings)
         
-        # 获取最高相似度及其索引
         max_score = float(np.max(similarities))
         max_index = int(np.argmax(similarities))
         
         return max_index, max_score
     
     @classmethod
-    def match(
+    async def match(
         cls,
         source_text: str,
         compare_list: List[str],
-        model: SentenceTransformer,
-        threshold: float
+        model_name: str,
+        threshold: float,
+        client: EmbeddingServiceClient
     ) -> MatchResponse:
         """
         执行相似度匹配
@@ -309,32 +246,28 @@ class SimilarityMatcher:
         Args:
             source_text: 源文本
             compare_list: 对比文本列表
-            model: Embedding 模型
+            model_name: 模型名称
             threshold: 相似度阈值
+            client: Embedding 服务客户端
             
         Returns:
             MatchResponse: 匹配结果
         """
-        # 边界情况处理：空列表
         if not compare_list:
             return MatchResponse(
                 matched_index=-1,
                 max_score=0.0,
-                model_used="unknown"
+                model_used=model_name
             )
         
-        # 批量计算 Embedding
         all_texts = [source_text] + compare_list
-        embeddings = cls.compute_embeddings(all_texts, model)
+        embeddings = await cls.compute_embeddings(all_texts, model_name, client)
         
-        # 分离源文本和对比文本的向量
-        source_embedding = embeddings[0:1]  # (1, D)
-        compare_embeddings = embeddings[1:]  # (N, D)
+        source_embedding = embeddings[0:1]
+        compare_embeddings = embeddings[1:]
         
-        # 找出最相似的文本
         max_index, max_score = cls.find_most_similar(source_embedding, compare_embeddings)
         
-        # 阈值判定
         if max_score >= threshold:
             matched_index = max_index
         else:
@@ -343,7 +276,7 @@ class SimilarityMatcher:
         return MatchResponse(
             matched_index=matched_index,
             max_score=round(max_score, 4),
-            model_used="unknown"
+            model_used=model_name
         )
 
 
@@ -353,29 +286,27 @@ class SimilarityMatcher:
 async def lifespan(app: FastAPI):
     """
     应用生命周期管理
-    
-    启动时预加载默认模型，确保第一次请求时模型已就绪。
     """
     logger.info("应用启动中...")
     
-    # 预加载默认模型
-    try:
-        model_manager.load_model(DEFAULT_MODEL_NAME)
-        logger.info(f"默认模型 '{DEFAULT_MODEL_NAME}' 预加载成功")
-    except Exception as e:
-        logger.warning(f"默认模型预加载失败: {str(e)}")
+    global _embedding_client
+    _embedding_client = EmbeddingServiceClient(timeout=HTTP_TIMEOUT)
+    await _embedding_client.__aenter__()
+    
+    logger.info("应用启动成功")
     
     yield
     
-    # 清理资源（如有需要）
+    if _embedding_client:
+        await _embedding_client.__aexit__(None, None, None)
+    
     logger.info("应用关闭")
 
 
-# 创建 FastAPI 应用
 app = FastAPI(
     title="文本相似度匹配 API",
     description="基于 Embedding 模型的文本相似度匹配服务",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan
 )
 
@@ -385,7 +316,7 @@ async def health_check():
     """健康检查接口"""
     return HealthResponse(
         status="healthy",
-        loaded_models=model_manager.get_loaded_models()
+        available_models=list(MODEL_SERVICE_URLS.keys())
     )
 
 
@@ -402,19 +333,15 @@ async def similarity_match(request: MatchRequest):
     - **threshold**: 相似度判定阈值
     """
     try:
-        # 获取或加载模型
-        model = model_manager.get_model(request.model_name)
+        client = await get_embedding_client()
         
-        # 执行匹配
-        result = SimilarityMatcher.match(
+        result = await SimilarityMatcher.match(
             source_text=request.source_text,
             compare_list=request.compare_list,
-            model=model,
-            threshold=request.threshold
+            model_name=request.model_name,
+            threshold=request.threshold,
+            client=client
         )
-        
-        # 设置实际使用的模型名称
-        result.model_used = request.model_name
         
         return result
         
@@ -425,7 +352,7 @@ async def similarity_match(request: MatchRequest):
             detail=str(e)
         )
     except RuntimeError as e:
-        logger.error(f"模型加载错误: {str(e)}")
+        logger.error(f"Embedding 服务错误: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(e)
@@ -441,7 +368,6 @@ async def similarity_match(request: MatchRequest):
 # ============== 主入口 ==============
 
 if __name__ == "__main__":
-    # 从环境变量获取配置
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8000"))
     reload = os.getenv("RELOAD", "false").lower() == "true"

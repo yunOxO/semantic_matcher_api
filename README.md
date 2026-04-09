@@ -22,10 +22,11 @@
 
 ## 支持的模型
 
-| 模型简称 | HuggingFace 模型名 |
-|---------|-------------------|
-| bge-large-zh | BAAI/bge-large-zh-v1.5 |
-| qwen3-embedding-0.6B | Alibaba-NLP/gte-Qwen2-1.5B-instruct |
+| 模型简称 | HuggingFace 模型名 | ModelScope 模型名 |
+|---------|-------------------|-------------------|
+| bge-large-zh | BAAI/bge-large-zh-v1.5 | BAAI/bge-large-zh-v1.5 |
+| bge-m3 | BAAI/bge-m3 | BAAI/bge-m3 |
+| qwen3-embedding-0.6B | Qwen/Qwen3-Embedding-0.6B | Qwen/Qwen3-Embedding-0.6B |  
 
 ## 快速开始
 
@@ -154,6 +155,68 @@ similarity-match/
 2. **批量推理**: 将多个文本一次性送入模型，比单条处理效率更高
 3. **GPU 加速**: 如果有 GPU，sentence-transformers 会自动使用
 4. **模型选择**: 根据场景选择合适的模型，轻量级模型推理更快
+
+## Flash Attention 2 配置（Qwen3-06B 模型专用）
+
+Qwen3-06B 模型支持使用 Flash Attention 2 进行加速推理。请根据您的环境选择合适的版本安装：
+
+### 前置条件检查
+
+首先确认您的环境版本：
+
+```bash
+# 检查 Python 版本
+python --version
+
+# 检查 PyTorch 版本
+python -c "import torch; print(torch.__version__)"
+
+# 检查 CUDA 版本
+python -c "import torch; print(torch.version.cuda)"
+```
+
+### 下载并安装 Flash Attention 2
+
+访问 [flash-attention-prebuild-wheels](https://github.com/mjun0812/flash-attention-prebuild-wheels/releases) 查找与您环境匹配的版本，然后使用以下命令下载和安装：
+
+#### Linux x86_64 示例
+
+```bash
+# 示例：Python 3.10 + PyTorch 2.7 + CUDA 12.4
+wget https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.4.11/flash_attn-2.8.3+cu124torch2.7-cp310-cp310-linux_x86_64.whl
+pip install flash_attn-2.8.3+cu124torch2.7-cp310-cp310-linux_x86_64.whl
+```
+
+#### Windows x86_64 示例
+
+```bash
+# 示例：Python 3.11 + PyTorch 2.11 + CUDA 12.8
+# 使用 PowerShell 下载
+Invoke-WebRequest -Uri "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.6/flash_attn-2.8.3+cu128torch2.11-cp311-cp311-win_amd64.whl" -OutFile "flash_attn-2.8.3+cu128torch2.11-cp311-cp311-win_amd64.whl"
+pip install flash_attn-2.8.3+cu128torch2.11-cp311-cp311-win_amd64.whl
+```
+
+### Wheel 文件命名规则
+
+文件名格式：`flash_attn-{flash_attn_version}+cu{cuda_version}torch{torch_version}-cp{python_version}-cp{python_version}-{platform}.whl`
+
+例如：`flash_attn-2.8.3+cu124torch2.7-cp310-cp310-linux_x86_64.whl`
+
+- Flash Attention 版本：2.8.3
+- CUDA 版本：12.4
+- PyTorch 版本：2.7
+- Python 版本：3.10
+- 平台：linux_x86_64
+
+### 启动 Qwen3-06B 模型服务
+
+安装 Flash Attention 2 后，启动 Qwen3-06B 模型服务：
+
+```bash
+python tool_emb_qwen3_06b.py
+```
+
+服务将在 `http://0.0.0.0:8800` 启动，并自动使用 Flash Attention 2 加速。
 
 ## 贡献指南
 
