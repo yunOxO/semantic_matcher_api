@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  similarity-match:
+    build: .
+    container_name: similarity-match
+    ports:
+      - "8000:8000"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+    volumes:
+      # 挂载模型缓存目录，避免每次启动都重新下载模型
+      - model-cache:/root/.cache
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  model-cache:
